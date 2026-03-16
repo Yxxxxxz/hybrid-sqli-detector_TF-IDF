@@ -11,7 +11,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from difflib import SequenceMatcher
-###################################################### TF-IDF + Random Forest ######################################
+###################################################### TF-IDF + Random Forest แก้ Login ######################################
 
 ###############################################
 # Hybrid SQLi Detector (TF-IDF Version)
@@ -89,14 +89,21 @@ class SQLiDetector:
 
     def skeletonize(self, text):
 
-        text = re.sub(r'0x[0-9a-f]+', ' CONST_HEX ', text)
+    # hex
+        text = re.sub(r'0x[0-9a-fA-F]+', ' CONST_HEX ', text)
 
+        # quoted string
         text = re.sub(r"'[^']*'", ' CONST_STR ', text)
         text = re.sub(r'"[^"]*"', ' CONST_STR ', text)
 
+        # boolean
         text = re.sub(r'\b(true|false|null)\b', ' CONST_BOOL ', text)
 
+        # numbers
         text = re.sub(r'\b\d+(\.\d+)?\b', ' CONST_NUM ', text)
+
+        # words mixed with numbers เช่น admin123
+        #text = re.sub(r'\b[a-zA-Z_]+\d+\b', ' CONST_STR ', text)
 
         return text
 
@@ -104,10 +111,15 @@ class SQLiDetector:
     # Tokenization
     # ======================================================
 
+        # ======================================================
+    # Tokenization
+    # ======================================================
+
     def tokenize_sql(self, query):
 
+        # แยก token สำหรับ SQL โดยเฉพาะ
         tokens = re.findall(
-            r"[a-zA-Z_]+|\d+|!=|==|<=|>=|['\"].*?['\"]|[^\s]",
+            r"[a-zA-Z0-9_]+|!=|==|<=|>=|--|/\*|\*/|['\"].*?['\"]|[(),=*<>]|[^\s]",
             str(query)
         )
 
@@ -180,8 +192,9 @@ class SQLiDetector:
         print("\nTraining TF-IDF...")
 
         self.vectorizer = TfidfVectorizer(
-            token_pattern=r"(?u)\b\w+\b",
-            max_features=5000
+        token_pattern=r"(?u)\b\w+\b",
+        max_features=5000,
+        ngram_range=(1,3)
         )
 
         X_train_vec = self.vectorizer.fit_transform(X_train_tokens).toarray()
