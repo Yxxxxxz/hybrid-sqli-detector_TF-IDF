@@ -5,44 +5,34 @@ import pandas as pd
 import joblib
 
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score
 
-from difflib import SequenceMatcher
-###################################################### TF-IDF + Random Forest แก้ Login ######################################
 
-###############################################
-# Hybrid SQLi Detector (TF-IDF Version)
-###############################################
+######################################################
+# SQLi Detector (FULL PIPELINE)
+######################################################
 
 class SQLiDetector:
 
     def __init__(self):
 
         self.vectorizer = None
-        self.scaler = None
         self.rf_model = None
 
-        # Signature patterns
+        # Signature rules
         self.signature_patterns = {
-
             "union-based": [
                 r"union\s+select",
                 r"union\s+all\s+select"
             ],
-
             "error-based": [
                 r"extractvalue\s*\(",
                 r"updatexml\s*\(",
-                r"floor\s*\(\s*rand\s*\(",
-                r"group\s+by\s+.*rand",
                 r"information_schema",
-                r"mysql_fetch",
                 r"syntax\s+error"
             ],
-
             "time-based": [
                 r"sleep\s*\(",
                 r"benchmark\s*\(",
@@ -51,263 +41,217 @@ class SQLiDetector:
             ]
         }
 
-    # ======================================================
-    # Data Cleaning
-    # ======================================================
+    # =========================
+    # LOAD MODEL
+    # =========================
+    @staticmethod
+    def load(path="sqli_detector.pkl"):
+        data = joblib.load(path)
 
-    def clean_data(self, df):
+        model = SQLiDetector()
+        model.vectorizer = data["vectorizer"]
+        model.rf_model = data["rf_model"]
 
-        print("Cleaning dataset...")
+        print("✅ Loaded model:", path)
+        return model
 
-        df = df.dropna(subset=["payload"])
-        df = df.drop_duplicates()
+    # =========================
+    # AUTO DETECT COLUMN
+    # =========================
+    def detect_columns(self, df):
 
-        df["payload"] = df["payload"].astype(str)
+        df.columns = df.columns.str.strip()
 
-        df = df[df["payload"].str.strip() != ""]
-        df = df[df["payload"].str.len() > 3]
+        text_candidates = ["text", "payload", "query", "input"]
+        label_candidates = ["label", "is_sqli", "target"]
 
-        return df
+        text_col = None
+        label_col = None
 
-    # ======================================================
-    # Normalization
-    # ======================================================
+        for c in text_candidates:
+            if c in df.columns:
+                text_col = c
+                break
 
+        for c in label_candidates:
+            if c in df.columns:
+                label_col = c
+                break
+
+        if text_col is None:
+            raise Exception(f"❌ ไม่เจอ text column ใน {df.columns}")
+
+        if label_col is None:
+            raise Exception(f"❌ ไม่เจอ label column ใน {df.columns}")
+
+        print(f"✅ Use text column: {text_col}")
+        print(f"✅ Use label column: {label_col}")
+
+        return text_col, label_col
+
+    # =========================
+    # TRAIN FROM CSV
+    # =========================
+    def train_from_csv(self, csv_path, model_path="sqli_detector.pkl"):
+
+        print("📂 Loading dataset...")
+
+        try:
+            df = pd.read_csv(csv_path, encoding="utf-8")
+        except:
+            df = pd.read_csv(csv_path, encoding="latin-1")
+
+        print("Columns:", df.columns.tolist())
+
+        text_col, label_col = self.detect_columns(df)
+
+        texts = df[text_col].astype(str).tolist()
+        labels = df[label_col].astype(int).tolist()
+
+        print("Total samples:", len(texts))
+        print("Label distribution:\n", pd.Series(labels).value_counts())
+
+        # =========================
+        # PREPROCESS
+        # =========================
+        print("\n🔧 Preprocessing...")
+        X_clean = [self.preprocess(t) for t in texts]
+
+        # =========================
+        # SPLIT 90/10
+        # =========================
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_clean, labels,
+            test_size=0.1,
+            random_state=42,
+            stratify=labels
+        )
+
+        print(f"\nTrain: {len(X_train)} | Test: {len(X_test)}")
+
+        # =========================
+        # TF-IDF
+        # =========================
+        self.vectorizer = TfidfVectorizer(
+            max_features=10000,
+            ngram_range=(1, 2)
+        )
+
+        X_train_vec = self.vectorizer.fit_transform(X_train)
+        X_test_vec = self.vectorizer.transform(X_test)
+
+        # =========================
+        # MODEL
+        # =========================
+        self.rf_model = RandomForestClassifier(
+            n_estimators=200,
+            random_state=42,
+            n_jobs=-1,
+            class_weight="balanced"   # 🔥 สำคัญมาก
+        )
+
+        print("\n🚀 Training model...")
+        self.rf_model.fit(X_train_vec, y_train)
+
+        # =========================
+        # EVALUATE
+        # =========================
+        print("\n📊 Evaluating...")
+
+        y_pred = self.rf_model.predict(X_test_vec)
+
+        acc = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+
+        print("\n=== METRICS ===")
+        print("Accuracy :", acc)
+        print("F1-score :", f1)
+
+        print("\n=== CONFUSION MATRIX ===")
+        print(confusion_matrix(y_test, y_pred))
+
+        print("\n=== CLASSIFICATION REPORT ===")
+        print(classification_report(y_test, y_pred, digits=4))
+
+        # =========================
+        # SAVE MODEL
+        # =========================
+        print("\n💾 Saving model...")
+        joblib.dump({
+            "vectorizer": self.vectorizer,
+            "rf_model": self.rf_model
+        }, model_path)
+
+        print("✅ Model saved:", model_path)
+
+    # =========================
+    # NORMALIZE
+    # =========================
     def normalize(self, text):
-
         text = str(text)
-
         text = urllib.parse.unquote(text)
         text = text.lower()
         text = re.sub(r"\s+", " ", text)
-
         return text.strip()
 
-    # ======================================================
-    # Skeletonization
-    # ======================================================
-
+    # =========================
+    # SKELETON
+    # =========================
     def skeletonize(self, text):
-
-    # hex
         text = re.sub(r'0x[0-9a-fA-F]+', ' CONST_HEX ', text)
-
-        # quoted string
         text = re.sub(r"'[^']*'", ' CONST_STR ', text)
         text = re.sub(r'"[^"]*"', ' CONST_STR ', text)
-
-        # boolean
         text = re.sub(r'\b(true|false|null)\b', ' CONST_BOOL ', text)
-
-        # numbers
         text = re.sub(r'\b\d+(\.\d+)?\b', ' CONST_NUM ', text)
-
-        # words mixed with numbers เช่น admin123
-        #text = re.sub(r'\b[a-zA-Z_]+\d+\b', ' CONST_STR ', text)
-
         return text
 
-    # ======================================================
-    # Tokenization
-    # ======================================================
-
-        # ======================================================
-    # Tokenization
-    # ======================================================
-
+    # =========================
+    # TOKENIZE
+    # =========================
     def tokenize_sql(self, query):
-
-        # แยก token สำหรับ SQL โดยเฉพาะ
         tokens = re.findall(
-            r"[a-zA-Z0-9_]+|!=|==|<=|>=|--|/\*|\*/|['\"].*?['\"]|[(),=*<>]|[^\s]",
+            r"[a-zA-Z0-9_]+|!=|==|<=|>=|--|/\*|\*/|[(),=*<>]|[^\s]",
             str(query)
         )
+        return tokens if tokens else ["UNK"]
 
-        return tokens
+    # =========================
+    # PREPROCESS
+    # =========================
+    def preprocess(self, text):
+        text = self.normalize(text)
+        text = self.skeletonize(text)
+        tokens = self.tokenize_sql(text)
+        return " ".join(tokens)
 
-    # ======================================================
-    # Fuzzy Similarity
-    # ======================================================
-
-    def fuzzy_similarity(self, a, b):
-
-        return SequenceMatcher(None, a, b).ratio()
-
-    # ======================================================
-    # Signature Detection
-    # ======================================================
-
+    # =========================
+    # SIGNATURE CHECK
+    # =========================
     def signature_check(self, payload):
 
         payload = self.normalize(payload)
 
         for category, patterns in self.signature_patterns.items():
-
             for pattern in patterns:
-
                 if re.search(pattern, payload):
-                    return True, f"{category} signature"
-
-                score = self.fuzzy_similarity(payload, pattern)
-
-                if score > 0.75:
-                    return True, f"fuzzy {category} signature"
+                    return True, category
 
         return False, None
 
-    # ======================================================
-    # Train + Evaluate
-    # ======================================================
+    # =========================
+    # PREDICT
+    # =========================
+    def predict(self, text):
 
-    def train_and_evaluate(self, df):
+        is_sqli, reason = self.signature_check(text)
 
-        df = self.clean_data(df)
+        if is_sqli:
+            return 1, 1.0, f"BLOCKED ({reason})"
 
-        df["payload"] = df["payload"].apply(self.normalize)
+        clean = self.preprocess(text)
+        vec = self.vectorizer.transform([clean])
 
-        X = df["payload"]
-        y = df["label"].values
+        pred = self.rf_model.predict(vec)[0]
+        prob = self.rf_model.predict_proba(vec)[0][1]
 
-        print("\nLabel Distribution")
-        print(df["label"].value_counts())
-        print("Total records:", len(df))
-
-        X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-            X,
-            y,
-            test_size=0.1,
-            stratify=y,
-            random_state=42
-        )
-
-        # skeleton ก่อน tokenize
-        X_train_tokens = X_train_raw.apply(
-            lambda x: " ".join(self.tokenize_sql(self.skeletonize(x)))
-        )
-
-        X_test_tokens = X_test_raw.apply(
-            lambda x: " ".join(self.tokenize_sql(self.skeletonize(x)))
-        )
-
-        print("\nTraining TF-IDF...")
-
-        self.vectorizer = TfidfVectorizer(
-        token_pattern=r"(?u)\b\w+\b",
-        max_features=5000,
-        ngram_range=(1,3)
-        )
-
-        X_train_vec = self.vectorizer.fit_transform(X_train_tokens).toarray()
-        X_test_vec = self.vectorizer.transform(X_test_tokens).toarray()
-
-        self.scaler = StandardScaler()
-
-        X_train_scaled = self.scaler.fit_transform(X_train_vec)
-        X_test_scaled = self.scaler.transform(X_test_vec)
-
-        print("\nTraining RandomForest...")
-
-        self.rf_model = RandomForestClassifier(
-            n_estimators=300,
-            class_weight="balanced",
-            n_jobs=-1,
-            random_state=42
-        )
-
-        self.rf_model.fit(X_train_scaled, y_train)
-
-        self.evaluate(X_test_scaled, y_test)
-
-    # ======================================================
-    # Evaluation
-    # ======================================================
-
-    def evaluate(self, X_test, y_test):
-
-        print("\n==============================")
-        print("Performance Results")
-        print("==============================")
-
-        y_pred = self.rf_model.predict(X_test)
-
-        print("Accuracy:", accuracy_score(y_test, y_pred))
-
-        print("\nClassification Report")
-        print(classification_report(y_test, y_pred))
-
-        print("\nConfusion Matrix")
-        print(confusion_matrix(y_test, y_pred))
-
-    # ======================================================
-    # Save Model
-    # ======================================================
-
-    def save_model(self, path="models/sqli_detector.pkl"):
-
-        data_to_save = {
-            'vectorizer': self.vectorizer,
-            'scaler': self.scaler,
-            'rf_model': self.rf_model
-        }
-
-        joblib.dump(data_to_save, path)
-
-        print(f"\n✅ Brain saved to {path}")
-
-    # ======================================================
-    # Load Model
-    # ======================================================
-
-    @staticmethod
-    def load_model(path="models/sqli_detector.pkl"):
-
-        data = joblib.load(path)
-
-        new_detector = SQLiDetector()
-
-        new_detector.vectorizer = data.get('vectorizer')
-        new_detector.scaler = data.get('scaler')
-        new_detector.rf_model = data.get('rf_model')
-
-        print(f"✅ Model loaded from {path}")
-
-        return new_detector
-
-    # ======================================================
-    # Predict Payload
-    # ======================================================
-
-    def predict_single(self, payload):
-
-        if self.rf_model is None:
-            raise Exception("Model not loaded")
-
-        payload = self.normalize(payload)
-
-        sig_detect, reason = self.signature_check(payload)
-
-        if sig_detect:
-
-            return {
-                "prediction": "BLOCKED",
-                "stage": "Signature Detection",
-                "reason": reason
-            }
-
-        payload = self.skeletonize(payload)
-
-        tokens = " ".join(self.tokenize_sql(payload))
-
-        vec = self.vectorizer.transform([tokens]).toarray()
-
-        vec_scaled = self.scaler.transform(vec)
-
-        pred = self.rf_model.predict(vec_scaled)[0]
-
-        prob = self.rf_model.predict_proba(vec_scaled)[0][1]
-
-        return {
-            "prediction": "BLOCKED" if pred == 1 else "ALLOW",
-            "stage": "RandomForest ML",
-            "malicious_probability": float(prob)
-        }
+        return pred, prob, "ML"
