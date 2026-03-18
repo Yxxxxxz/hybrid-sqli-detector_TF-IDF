@@ -134,7 +134,7 @@ class SQLiDetector:
         # =========================
         self.vectorizer = TfidfVectorizer(
             max_features=10000,
-            ngram_range=(1, 2)
+            ngram_range=(1, 3)
         )
 
         X_train_vec = self.vectorizer.fit_transform(X_train)
