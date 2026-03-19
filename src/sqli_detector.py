@@ -3,6 +3,7 @@ import urllib.parse
 import numpy as np
 import pandas as pd
 import joblib
+from difflib import SequenceMatcher  # ✅ เพิ่มให้เหมือน Word2Vec
 
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -21,18 +22,24 @@ class SQLiDetector:
         self.vectorizer = None
         self.rf_model = None
 
-        # Signature rules
+        # ✅ Signature patterns (เหมือน Word2Vec เป๊ะ)
         self.signature_patterns = {
+
             "union-based": [
                 r"union\s+select",
                 r"union\s+all\s+select"
             ],
+
             "error-based": [
                 r"extractvalue\s*\(",
                 r"updatexml\s*\(",
+                r"floor\s*\(\s*rand\s*\(",
+                r"group\s+by\s+.*rand",
                 r"information_schema",
+                r"mysql_fetch",
                 r"syntax\s+error"
             ],
+
             "time-based": [
                 r"sleep\s*\(",
                 r"benchmark\s*\(",
@@ -147,7 +154,7 @@ class SQLiDetector:
             n_estimators=200,
             random_state=42,
             n_jobs=-1,
-            class_weight="balanced"   # 🔥 สำคัญมาก
+            class_weight="balanced"
         )
 
         print("\n🚀 Training model...")
@@ -206,6 +213,12 @@ class SQLiDetector:
         return text
 
     # =========================
+    # 🔥 FUZZY (เหมือน Word2Vec)
+    # =========================
+    def fuzzy_similarity(self, a, b):
+        return SequenceMatcher(None, a, b).ratio()
+
+    # =========================
     # TOKENIZE
     # =========================
     def tokenize_sql(self, query):
@@ -225,16 +238,25 @@ class SQLiDetector:
         return " ".join(tokens)
 
     # =========================
-    # SIGNATURE CHECK
+    # 🔥 SIGNATURE CHECK (เหมือน Word2Vec เป๊ะ)
     # =========================
     def signature_check(self, payload):
 
         payload = self.normalize(payload)
 
         for category, patterns in self.signature_patterns.items():
+
             for pattern in patterns:
+
+                # Exact match
                 if re.search(pattern, payload):
-                    return True, category
+                    return True, f"{category} signature"
+
+                # Fuzzy match (สำคัญมาก)
+                score = self.fuzzy_similarity(payload, pattern)
+
+                if score > 0.75:
+                    return True, f"fuzzy {category} signature"
 
         return False, None
 
@@ -255,3 +277,5 @@ class SQLiDetector:
         prob = self.rf_model.predict_proba(vec)[0][1]
 
         return pred, prob, "ML"
+
+
